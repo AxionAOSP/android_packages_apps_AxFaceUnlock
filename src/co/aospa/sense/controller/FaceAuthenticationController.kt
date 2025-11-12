@@ -73,6 +73,7 @@ open class FaceAuthenticationController(
     private var mTexture: SurfaceTexture? = null
     fun start() {
         Log.i(TAG, "start enter")
+        Process.setThreadAffinity(Process.myPid(), 2)
         mHandler!!.sendEmptyMessageDelayed(MSG_CAMERA_OPEN, 0)
     }
 
@@ -121,6 +122,7 @@ open class FaceAuthenticationController(
             mCompareSuccess = false
         }
         Log.i(TAG, "stop exit")
+        Process.setThreadAffinity(Process.myPid(), 1)
     }
 
     private fun resetTimeout(timeout: Long) {

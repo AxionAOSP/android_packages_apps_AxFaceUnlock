@@ -3,6 +3,7 @@ package co.aospa.sense
 import android.app.Application
 import android.content.ComponentName
 import android.content.pm.PackageManager
+import android.os.Process
 import android.util.Log
 import co.aospa.sense.activities.EnrollActivity
 import co.aospa.sense.util.Util
@@ -19,6 +20,7 @@ class SenseApp : Application() {
             PackageManager.DONT_KILL_APP
         )
         Util.setFaceUnlockAvailable(applicationContext)
+        Process.setThreadAffinity(Process.myPid(), 1)
     }
 
     override fun onTerminate() {
