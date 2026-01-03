@@ -22,5 +22,6 @@ object Constants {
     const val MSG_UNLOCK_FAILED = 3
     const val MSG_UNLOCK_HALF_SHADOW = 32
     const val MSG_UNLOCK_HIGHLIGHT = 31
+    const val MSG_UNLOCK_UNLOCKING = 1
     const val MSG_UNLOCK_KEEP = 19
 }

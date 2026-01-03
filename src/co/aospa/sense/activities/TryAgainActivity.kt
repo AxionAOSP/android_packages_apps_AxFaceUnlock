@@ -1,62 +1,56 @@
+/*
+ * Copyright (C) 2025 AxionOS
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package co.aospa.sense.activities
 
 import android.content.Intent
-import android.content.res.Resources
 import android.os.Bundle
-import android.view.View
-import co.aospa.sense.R
-import com.google.android.setupcompat.template.FooterBarMixin
-import com.google.android.setupcompat.template.FooterButton
-import com.google.android.setupdesign.GlifLayout
-import com.google.android.setupdesign.util.ThemeHelper
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import co.aospa.sense.ui.screens.TryAgainScreen
+import co.aospa.sense.util.Constants
 
+class TryAgainActivity : ComponentActivity() {
 
-class TryAgainActivity : FaceBaseActivity() {
+    private var token: ByteArray? = null
+    private var userId = 0
 
-    override fun onCreate(bundle: Bundle?) {
-        super.onCreate(bundle)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
 
-        setTheme(ThemeHelper.getSuwDefaultTheme(applicationContext))
-        ThemeHelper.trySetDynamicColor(this)
+        token = intent.getByteArrayExtra(Constants.EXTRA_KEY_CHALLENGE_TOKEN)
+        userId = intent.getIntExtra(Intent.EXTRA_USER_ID, 0)
 
-        setContentView(R.layout.face_enroll_try_again)
-        setHeaderText(R.string.face_try_again_title)
-        getLayout().setDescriptionText(R.string.face_try_again_description)
+        if (savedInstanceState != null && token == null) {
+            token = savedInstanceState.getByteArray(Constants.EXTRA_KEY_CHALLENGE_TOKEN)
+            userId = savedInstanceState.getInt(Intent.EXTRA_USER_ID)
+        }
 
-        val footerBarMixin = getLayout().getMixin(FooterBarMixin::class.java) as FooterBarMixin
-        footerBarMixin.primaryButton =
-            FooterButton.Builder(this)
-                .setText(R.string.btn_try_again)
-                .setListener { setTryAgainButton() }
-                .setButtonType(FooterButton.ButtonType.OTHER)
-                .setTheme(com.google.android.setupdesign.R.style.SudGlifButton_Primary)
-                .build()
-        if (mToken == null) {
-            footerBarMixin.primaryButton.visibility = View.INVISIBLE
+        setContent {
+            TryAgainScreen(
+                onTryAgain = {
+                    startActivity(Intent(this, EnrollActivity::class.java).apply {
+                        putExtra(Constants.EXTRA_KEY_CHALLENGE_TOKEN, token)
+                        putExtra(Intent.EXTRA_USER_ID, userId)
+                    })
+                    finish()
+                },
+                showButton = token != null
+            )
         }
     }
 
-    override fun onApplyThemeResource(theme: Resources.Theme, resid: Int, first: Boolean) {
-        theme.applyStyle(R.style.SetupWizardPartnerResource, true)
-        super.onApplyThemeResource(theme, resid, first)
-    }
-
-    override fun getLayout(): GlifLayout {
-        return findViewById(R.id.face_enroll_try_again)
-            ?: throw IllegalStateException("Missing required GlifLayout view with id 'face_enroll_try_again'")
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putByteArray(Constants.EXTRA_KEY_CHALLENGE_TOKEN, token)
+        outState.putInt(Intent.EXTRA_USER_ID, userId)
     }
 
     override fun onPause() {
         super.onPause()
         finish()
     }
-
-    private fun setTryAgainButton() {
-        val intent = Intent()
-        intent.setClass(this@TryAgainActivity, EnrollActivity::class.java)
-        parseIntent(intent)
-        startActivity(intent)
-        finish()
-    }
-
 }

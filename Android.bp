@@ -1,4 +1,5 @@
 // Copyright (C) 2020-2022 Paranoid Android
+// Copyright (C) 2025 AxionOS
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,25 +16,45 @@
 android_app {
     name: "FaceUnlock",
     srcs: ["src/**/*.java", "src/**/*.kt"],
+    asset_dirs: ["assets"],
     static_libs: [
         "androidx.core_core",
         "androidx.appcompat_appcompat",
+        "androidx.lifecycle_lifecycle-runtime",
+        "androidx.lifecycle_lifecycle-common",
+        "androidx.camera_camera-core",
+        "androidx.camera_camera-camera2",
+        "androidx.camera_camera-lifecycle",
+        "androidx.camera_camera-viewfinder",
+        "androidx.compose.ui_ui",
+        "androidx.compose.material3_material3",
+        "androidx.compose.foundation_foundation",
+        "androidx.compose.runtime_runtime",
+        "androidx.activity_activity-compose",
         "setup-wizard-lib",
         "setupcompat",
         "setupdesign",
+        "tensorflowlite_java",
+        "tflite_support_java",
         "vendor.aospa.biometrics.face",
-        "vendor.aospa.biometrics.face.impl",
+        "kotlinx-coroutines-android",
     ],
 
     required: [
-        "libFaceDetectCA",
-        "libmegface_faceunlock",
-        "libMegviiUnlock",
-        "libMegviiUnlock-jni-1.2",
         "default_permissions_co.aospa.sense.xml",
         "hiddenapi-whitelist-co.aospa.sense.xml",
         "privapp_whitelist_co.aospa.sense.xml",
         "FaceUnlockOverlay",
+    ],
+
+    aaptflags: [
+        "-0 .tflite",
+    ],
+
+    jni_libs: [
+        "libtensorflowlite_jni",
+        "libimage_processing_util_jni",
+        "libsurface_util_jni",
     ],
 
     platform_apis: true,
@@ -42,74 +63,6 @@ android_app {
     optimize: {
         enabled: false,
     },
-    system_ext_specific: true,
-}
-
-cc_prebuilt_library_shared {
-    name: "libFaceDetectCA",
-    strip: {
-        none: true,
-    },
-    target: {
-        android_arm64: { srcs: [ "lib/libFaceDetectCA.so" ] },
-    },
-
-    compile_multilib: "64",
-    check_elf_files: false,
-    prefer: true,
-    system_ext_specific: true,
-}
-
-cc_prebuilt_library_shared {
-    name: "libmegface_faceunlock",
-    stem: "libmegface",
-    strip: {
-        none: true,
-    },
-    target: {
-        android_arm64: { srcs: [ "lib/libmegface.so" ] },
-    },
-
-    compile_multilib: "64",
-    check_elf_files: false,
-    prefer: true,
-    system_ext_specific: true,
-}
-
-cc_prebuilt_library_shared {
-    name: "libMegviiUnlock",
-    strip: {
-        none: true,
-    },
-    target: {
-        android_arm64: { srcs: [ "lib/libMegviiUnlock.so" ] },
-    },
-
-    compile_multilib: "64",
-    check_elf_files: false,
-    prefer: true,
-    system_ext_specific: true,
-}
-
-cc_prebuilt_library_shared {
-    name: "libMegviiUnlock-jni-1.2",
-    strip: {
-        none: true,
-    },
-    target: {
-        android_arm64: { srcs: [ "lib/libMegviiUnlock-jni-1.2.so" ] },
-    },
-
-    compile_multilib: "64",
-    check_elf_files: false,
-    prefer: true,
-    system_ext_specific: true,
-}
-
-java_import {
-    name: "vendor.aospa.biometrics.face.impl",
-    jars: ["lib/vendorImplPrebuilt.jar"],
-    sdk_version: "current",
     system_ext_specific: true,
 }
 
@@ -132,4 +85,50 @@ prebuilt_etc {
     src: "permissions/privapp_whitelist_co.aospa.sense.xml",
     sub_dir: "permissions",
     system_ext_specific: true,
+}
+
+cc_prebuilt_library_shared {
+    name: "libimage_processing_util_jni",
+    arch: {
+        arm64: {
+            srcs: ["libs/androidx-camera_camera-core/jni/arm64-v8a/libimage_processing_util_jni.so"],
+        },
+        arm: {
+            srcs: ["libs/androidx-camera_camera-core/jni/armeabi-v7a/libimage_processing_util_jni.so"],
+        },
+        x86_64: {
+            srcs: ["libs/androidx-camera_camera-core/jni/x86_64/libimage_processing_util_jni.so"],
+        },
+        x86: {
+            srcs: ["libs/androidx-camera_camera-core/jni/x86/libimage_processing_util_jni.so"],
+        },
+    },
+    system_ext_specific: true,
+    strip: {
+        none: true,
+    },
+    check_elf_files: false,
+}
+
+cc_prebuilt_library_shared {
+    name: "libsurface_util_jni",
+    arch: {
+        arm64: {
+            srcs: ["libs/androidx-camera_camera-core/jni/arm64-v8a/libsurface_util_jni.so"],
+        },
+        arm: {
+            srcs: ["libs/androidx-camera_camera-core/jni/armeabi-v7a/libsurface_util_jni.so"],
+        },
+        x86_64: {
+            srcs: ["libs/androidx-camera_camera-core/jni/x86_64/libsurface_util_jni.so"],
+        },
+        x86: {
+            srcs: ["libs/androidx-camera_camera-core/jni/x86/libsurface_util_jni.so"],
+        },
+    },
+    system_ext_specific: true,
+    strip: {
+        none: true,
+    },
+    check_elf_files: false,
 }

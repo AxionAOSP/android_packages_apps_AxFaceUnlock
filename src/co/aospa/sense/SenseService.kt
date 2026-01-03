@@ -1,14 +1,15 @@
+/*
+ * Copyright (C) 2025 AxionOS
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 package co.aospa.sense
 
 import android.Manifest
-import android.app.AlarmManager
-import android.app.PendingIntent
 import android.app.Service
-import android.content.BroadcastReceiver
-import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.hardware.Camera
+import android.graphics.Bitmap
 import android.hardware.biometrics.BiometricFaceConstants
 import android.hardware.camera2.CameraManager
 import android.os.*
@@ -17,14 +18,12 @@ import androidx.core.content.ContextCompat
 
 import co.aospa.sense.controller.FaceAuthenticationController
 import co.aospa.sense.controller.FaceEnrollController
-import co.aospa.sense.camera.CameraUtil
+import co.aospa.sense.camera.ServiceLifecycleOwner
 import co.aospa.sense.util.Constants
 import co.aospa.sense.util.PreferenceHelper
 import co.aospa.sense.util.Util
-import co.aospa.sense.vendor.Vendor
 import co.aospa.sense.vendor.VendorImpl
 
-import java.lang.StringBuilder
 import java.util.*
 
 import vendor.aospa.biometrics.face.ISenseService
@@ -32,194 +31,120 @@ import vendor.aospa.biometrics.face.ISenseServiceReceiver
 
 class SenseService : Service() {
 
-    private lateinit var mIdleTimeoutIntent: PendingIntent
-    private lateinit var mLockoutTimeoutIntent: PendingIntent
-    private var mAlarmManager: AlarmManager? = null
-    private var mCameraAuthController: FaceAuthenticationController? = null
-    private var mCameraEnrollController: FaceEnrollController? = null
-    private var mCameraManager: CameraManager? = null
-    private var mSenseReceiver: ISenseServiceReceiver? = null
-    private var mPreferenceHelper: PreferenceHelper? = null
-    private var mService: SenseServiceWrapper? = null
-    private var mVendorImpl: Vendor? = null
-    private var mCameraId = 0
-    private var mChallengeCount = 0
-    private var mUserId = 0
-    private var mAuthenticationErrorCount = 0
-    private var mAuthenticationErrorThrottleCount = 0
-    private var mLockoutType = LOCKOUT_TYPE_DISABLED
-    private var mChallenge: Long = 0
-    private var mEnrollToken: ByteArray? = null
-    private var mOnIdleTimer = false
-    private var mOnLockoutTimer = false
-    private var mUserUnlocked = false
-    private var mIsAuthenticated = false
+    private var cameraAuthController: FaceAuthenticationController? = null
+    private var cameraEnrollController: FaceEnrollController? = null
+    private var cameraManager: CameraManager? = null
+    private var senseReceiver: ISenseServiceReceiver? = null
+    private var preferenceHelper: PreferenceHelper? = null
+    private var service: SenseServiceWrapper? = null
+    private var vendorImpl: VendorImpl? = null
+    private var authLifecycleOwner: ServiceLifecycleOwner? = null
+    private var enrollLifecycleOwner: ServiceLifecycleOwner? = null
+    private var cameraId = 0
+    private var challengeCount = 0
+    private var userId = 0
+    private var challenge: Long = 0
+    private var enrollToken: ByteArray? = null
+    private var isAuthenticated = false
+    private var workHandler: FaceHandler? = null
 
-    private val mLockoutLock = Any()
-    private val mAuthErrorLock = Any()
+    private val authCallback = object : FaceAuthenticationController.ServiceCallback {
+        override fun handleFrame(bitmap: Bitmap): Int {
+            if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "handleFrame start")
 
-    private val mReceiver: BroadcastReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context, intent: Intent) {
-            val action = intent.action
-            if (Util.IS_DEBUG_LOGGING) {
-                Log.d(TAG, "OnReceive intent = $intent")
-            }
-            when (action) {
-                ALARM_TIMEOUT_FREEZED -> synchronized(mLockoutLock) {
-                    mLockoutType = LOCKOUT_TYPE_IDLE
-                }
-                ALARM_FAIL_TIMEOUT_LOCKOUT -> {
-                    cancelLockoutTimer()
-                    synchronized(mLockoutLock) { mLockoutType = LOCKOUT_TYPE_DISABLED }
-                    synchronized(mAuthErrorLock) { mAuthenticationErrorCount = 0 }
-                }
-                Intent.ACTION_SCREEN_OFF, Intent.ACTION_USER_PRESENT -> {
-                    mUserUnlocked = action == Intent.ACTION_USER_PRESENT
-                    updateTimersAndLockout()
-                }
-            }
-        }
-    }
+            val result = vendorImpl?.compare(bitmap) ?: Constants.MSG_UNLOCK_FAILED
 
-    private val mCameraAvailabilityCallback: CameraManager.AvailabilityCallback =
-        object : CameraManager.AvailabilityCallback() {
-            override fun onCameraAvailable(cameraId: String) {
-                super.onCameraAvailable(cameraId)
-                if (mCameraId == cameraId.toInt() && mIsAuthenticated) {
-                    mCameraManager!!.unregisterAvailabilityCallback(this)
-                    mIsAuthenticated = false
+            if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "handleFrame result=$result")
+
+            synchronized(this@SenseService) {
+                if (cameraAuthController == null) return -1
+                if (result == 0) {
+                    isAuthenticated = true
                     onAuthenticated()
                 }
             }
-
-            override fun onCameraUnavailable(cameraId: String) {
-                super.onCameraUnavailable(cameraId)
-            }
+            return result
         }
 
-    private val mCameraAuthControllerCallback: FaceAuthenticationController.ServiceCallback =
-        object : FaceAuthenticationController.ServiceCallback {
-            override fun handlePreviewData(data: ByteArray?, width: Int, height: Int): Int {
-                val imageData = IntArray(20)
-                if (Util.IS_DEBUG_LOGGING) {
-                    Log.d(TAG, "handleData start")
-                }
-                val result = mVendorImpl!!.compare(data, width, height, 0, true, true, imageData)
-                if (Util.IS_DEBUG_LOGGING) Log.d(
-                    TAG, "handlePreviewData result = " + result +
-                            " run: fake = " + imageData[0] + ", low = " + imageData[1] +
-                            ", compare score:" + imageData[2] + " live score:" + imageData[3].toDouble() / 100.0
+        override fun onTimeout(withFace: Boolean) {
+            if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "onTimeout, withFace=$withFace")
+            try {
+                senseReceiver?.onAuthenticated(
+                    0, -1, preferenceHelper?.getByteArrayValueByKey(Constants.SHARED_KEY_ENROLL_TOKEN)
                 )
-                synchronized(this) {
-                    if (mCameraAuthController == null) {
-                        return -1
-                    }
-                    if (result == 0) {
-                        mIsAuthenticated = true
-                        mCameraAuthController!!.stop()
-                    }
-                }
-                return result
+            } catch (e: RemoteException) {
+                e.printStackTrace()
             }
-
-            override fun setDetectArea(size: Camera.Size?) {
-                mVendorImpl!!.setDetectArea(0, 0, size!!.height, size.width)
-            }
-
-            override fun onTimeout(withFace: Boolean) {
-                if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "onTimeout, withFace=$withFace")
-                try {
-                    if (withFace) {
-                        increaseAndCheckLockout()
-                    }
-                    if (mLockoutType != LOCKOUT_TYPE_DISABLED) {
-                        sendLockoutError()
-                    } else {
-                        mSenseReceiver?.onAuthenticated(
-                            0, -1, mPreferenceHelper?.getByteArrayValueByKey(
-                                Constants.SHARED_KEY_ENROLL_TOKEN
-                            )
-                        )
-                    }
-                    stopAuthentication()
-                } catch (e: RemoteException) {
-                    e.printStackTrace()
-                }
-                stopAuthentication()
-            }
-
-            override fun onCameraError() {
-                try {
-                    mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
-                } catch (e: RemoteException) {
-                    e.printStackTrace()
-                }
-                stopAuthentication()
-            }
+            stopAuthentication()
         }
 
-    private val mCameraEnrollServiceCallback: FaceEnrollController.CameraCallback = object :
-        FaceEnrollController.CameraCallback {
-        val FEATURE_SIZE = 10000
-        val mImage = ByteArray(40000)
-        val mSavedFeature = ByteArray(FEATURE_SIZE)
-        override fun handleSaveFeatureResult(i: Int) {}
-        override fun onFaceDetected() {}
-        override fun handleSaveFeature(
-            data: ByteArray?,
-            width: Int,
-            height: Int,
-            angle: Int
-        ): Int {
-            val imageData = IntArray(1)
-            val result = mVendorImpl!!.saveFeature(
-                data,
-                width,
-                height,
-                angle,
-                true,
-                mSavedFeature,
-                mImage,
-                imageData
-            )
-            synchronized(this) {
-                if (mCameraEnrollController == null) {
-                    return -1
-                }
+        override fun onCameraError() {
+            try {
+                senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
+            } catch (e: RemoteException) {
+                e.printStackTrace()
+            }
+            stopAuthentication()
+        }
+    }
+
+    private val enrollCallback = object : FaceEnrollController.CameraCallback {
+        private val ENROLLMENT_SAMPLE_COUNT = 5
+        private var errorCount = 0
+        private val MAX_ERRORS = 3
+
+        override fun handleSaveFeature(bitmap: Bitmap): Int {
+            val result = vendorImpl?.saveFeature(bitmap) ?: -1
+
+            synchronized(this@SenseService) {
+                if (cameraEnrollController == null) return -1
+
                 try {
-                    val faceIds = imageData[0] + 1
+                    val faceIds = 1
                     if (result == 0) {
-                        val faceId: Int =
-                            mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID)
+                        if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "Enrollment complete")
+                        val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
                         if (faceId > 0) {
-                            mVendorImpl!!.deleteFeature(faceId)
+                            vendorImpl?.deleteFeature(faceId)
                         }
-                        mPreferenceHelper!!.saveIntValue(Constants.SHARED_KEY_FACE_ID, faceIds)
-                        mPreferenceHelper!!.saveByteArrayValue(
-                            Constants.SHARED_KEY_ENROLL_TOKEN,
-                            mEnrollToken
-                        )
+                        preferenceHelper?.saveIntValue(Constants.SHARED_KEY_FACE_ID, faceIds)
+                        preferenceHelper?.saveByteArrayValue(Constants.SHARED_KEY_ENROLL_TOKEN, enrollToken)
                         Util.setFaceUnlockAvailable(applicationContext)
+                        errorCount = 0
                         stopEnroll()
-                        mSenseReceiver?.onEnrollResult(faceIds, mUserId, 0)
-                    } else if (result == 19) {
-                        mSenseReceiver?.onEnrollResult(faceIds, mUserId, 1)
+                        senseReceiver?.onEnrollResult(faceIds, userId, 0)
+                    } else if (result == Constants.MSG_UNLOCK_KEEP) {
+                        if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "Enrollment in progress")
+                        val enrolledCount = vendorImpl?.getEnrolledCount(userId) ?: 0
+                        val remaining = ENROLLMENT_SAMPLE_COUNT - enrolledCount
+                        if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "Samples: $enrolledCount/$ENROLLMENT_SAMPLE_COUNT")
+                        senseReceiver?.onEnrollResult(faceIds, userId, remaining)
+                    } else if (result == Constants.MSG_UNLOCK_FAILED) {
+                        errorCount++
+                        if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "Enrollment error, count: $errorCount/$MAX_ERRORS")
+                        if (errorCount >= MAX_ERRORS) {
+                            errorCount = 0
+                            stopEnroll()
+                            senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_UNABLE_TO_PROCESS, 0)
+                        } else {
+                            senseReceiver?.onAcquired(userId, BiometricFaceConstants.FACE_ACQUIRED_NOT_DETECTED, 0)
+                        }
                     }
                 } catch (e: RemoteException) {
                     e.printStackTrace()
                 }
-                return result
             }
+            return result
         }
 
-        override fun setDetectArea(size: Camera.Size?) {
-            mVendorImpl!!.setDetectArea(0, 0, size!!.height, size.width)
-        }
+        override fun handleSaveFeatureResult(result: Int) {}
+
+        override fun onFaceDetected() {}
 
         override fun onTimeout() {
             try {
                 stopEnroll()
-                mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_TIMEOUT, 0)
+                senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_TIMEOUT, 0)
             } catch (e: RemoteException) {
                 e.printStackTrace()
             }
@@ -228,79 +153,55 @@ class SenseService : Service() {
         override fun onCameraError() {
             try {
                 stopEnroll()
-                mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
+                senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
             } catch (e: RemoteException) {
                 e.printStackTrace()
             }
         }
     }
-    private var mWorkHandler: FaceHandler? = null
+
     override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
         return START_REDELIVER_INTENT
     }
 
     override fun onBind(intent: Intent): IBinder? {
         if (Util.IS_DEBUG_LOGGING) Log.i(TAG, "onBind")
-        return mService
+        return service
     }
 
     override fun onCreate() {
         super.onCreate()
         if (Util.IS_DEBUG_LOGGING) Log.i(TAG, "onCreate")
-        mCameraManager = getSystemService(CameraManager::class.java)
-        mCameraId = CameraUtil.getCameraId(this)
-        mService = SenseServiceWrapper()
+        cameraManager = getSystemService(CameraManager::class.java)
+        service = SenseServiceWrapper()
         val handlerThread = HandlerThread(TAG, -2)
         handlerThread.start()
-        mWorkHandler = FaceHandler(handlerThread.looper)
-        mPreferenceHelper = PreferenceHelper(this)
-        mVendorImpl = VendorImpl(this)
-        mUserId = Util.getUserId(this)
-        if (!Util.isFaceUnlockDisabledByDPM(this) && Util.isFaceUnlockEnrolled(this)) {
-            mWorkHandler!!.post { mVendorImpl!!.init() }
-        }
-        mAlarmManager = getSystemService(AlarmManager::class.java)
-        mIdleTimeoutIntent = PendingIntent.getBroadcast(
-            applicationContext, 0, Intent(
-                ALARM_TIMEOUT_FREEZED
-            ), PendingIntent.FLAG_IMMUTABLE
-        )!!
-        mLockoutTimeoutIntent = PendingIntent.getBroadcast(
-            applicationContext, 0, Intent(
-                ALARM_FAIL_TIMEOUT_LOCKOUT
-            ), PendingIntent.FLAG_IMMUTABLE
-        )!!
-        val intentFilter = IntentFilter()
-        intentFilter.addAction(ALARM_TIMEOUT_FREEZED)
-        intentFilter.addAction(ALARM_FAIL_TIMEOUT_LOCKOUT)
-        intentFilter.addAction(Intent.ACTION_SCREEN_OFF)
-        intentFilter.addAction(Intent.ACTION_USER_PRESENT)
-        intentFilter.priority = IntentFilter.SYSTEM_HIGH_PRIORITY
-        registerReceiver(mReceiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
-        if (Util.IS_DEBUG_LOGGING) {
-            Log.d(TAG, "OnCreate end")
+        workHandler = FaceHandler(handlerThread.looper)
+        preferenceHelper = PreferenceHelper(this)
+        vendorImpl = VendorImpl(this)
+        userId = Util.getUserId(this)
+        if (!Util.isFaceUnlockDisabledByDPM(this)) {
+            workHandler?.post {
+                vendorImpl?.init()
+                Log.d(TAG, "VendorImpl initialized")
+            }
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        if (Util.IS_DEBUG_LOGGING) {
-            Log.d(TAG, "onDestroy")
-        }
-        mVendorImpl!!.release()
-        unregisterReceiver(mReceiver)
+        if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "onDestroy")
+        vendorImpl?.release()
+        authLifecycleOwner?.stop()
     }
 
     private fun onAuthenticated() {
         try {
-            mSenseReceiver?.onAuthenticated(
-                mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID),
-                mUserId,
-                mPreferenceHelper!!.getByteArrayValueByKey(
-                    Constants.SHARED_KEY_ENROLL_TOKEN
-                )
+            senseReceiver?.onAuthenticated(
+                preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0,
+                userId,
+                preferenceHelper?.getByteArrayValueByKey(Constants.SHARED_KEY_ENROLL_TOKEN)
             )
-            resetLockoutCount()
             stopAuthentication()
         } catch (e: RemoteException) {
             e.printStackTrace()
@@ -308,178 +209,90 @@ class SenseService : Service() {
     }
 
     private fun stopEnroll() {
-        mCameraEnrollController?.stop(mCameraEnrollServiceCallback)
-        mCameraEnrollController = null
-        mEnrollToken = null
-        mVendorImpl!!.saveFeatureStop()
+        cameraEnrollController?.stop(enrollCallback)
+        cameraEnrollController = null
+        enrollLifecycleOwner?.stop()
+        enrollLifecycleOwner = null
+        enrollToken = null
     }
 
     private fun stopAuthentication() {
         synchronized(this) {
-            mCameraAuthController?.stop()
-            mCameraAuthController = null
+            cameraAuthController?.stop()
+            cameraAuthController = null
+            authLifecycleOwner?.stop()
+            authLifecycleOwner = null
         }
-        mVendorImpl!!.compareStop()
     }
 
     private fun stopCurrentWork() {
-        if (mCameraAuthController != null) {
+        if (cameraAuthController != null) {
             try {
-                mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_USER_CANCELED, 0)
+                senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_USER_CANCELED, 0)
             } catch (e: RemoteException) {
                 e.printStackTrace()
             }
             stopAuthentication()
         }
-        if (mCameraEnrollController != null) {
+        if (cameraEnrollController != null) {
             try {
-                mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_USER_CANCELED, 0)
-            } catch (e2: RemoteException) {
-                e2.printStackTrace()
+                senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_USER_CANCELED, 0)
+            } catch (e: RemoteException) {
+                e.printStackTrace()
             }
             stopEnroll()
         }
     }
 
-    private fun startIdleTimer() {
-        mOnIdleTimer = true
-        mAlarmManager!![AlarmManager.ELAPSED_REALTIME, SystemClock.elapsedRealtime() + DEFAULT_IDLE_TIMEOUT_MS] =
-            mIdleTimeoutIntent!!
-    }
-
-    private fun cancelIdleTimer() {
-        mOnIdleTimer = false
-        mAlarmManager!!.cancel(mIdleTimeoutIntent!!)
-    }
-
-    private fun startLockoutTimer() {
-        val elapsedRealtime = SystemClock.elapsedRealtime() + FAIL_LOCKOUT_TIMEOUT_MS
-        mOnLockoutTimer = true
-        mAlarmManager!![AlarmManager.ELAPSED_REALTIME, elapsedRealtime] =
-            mLockoutTimeoutIntent!!
-    }
-
-    private fun cancelLockoutTimer() {
-        if (mOnLockoutTimer) {
-            mAlarmManager!!.cancel(mLockoutTimeoutIntent!!)
-            mOnLockoutTimer = false
-        }
-    }
-
-    private fun increaseAndCheckLockout() {
-        if (mOnLockoutTimer || mLockoutType != LOCKOUT_TYPE_DISABLED) {
-            return
-        }
-        synchronized(mAuthErrorLock) {
-            mAuthenticationErrorCount += 1
-            mAuthenticationErrorThrottleCount += 1
-            if (Util.IS_DEBUG_LOGGING) Log.d(
-                TAG,
-                "increaseAndCheckLockout, mAuthErrorCount =$mAuthenticationErrorCount, mAuthErrorThrottleCount =$mAuthenticationErrorThrottleCount"
-            )
-            if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "userUnlocked =$mUserUnlocked")
-            if (mUserUnlocked && mAuthenticationErrorCount == MAX_FAILED_ATTEMPTS_LOCKOUT_TIMED) {
-                Log.d(TAG, "Too many attempts, lockout permanent because device is unlocked")
-                synchronized(mLockoutLock) { mLockoutType = LOCKOUT_TYPE_PERMANENT }
-                cancelLockoutTimer()
-            } else if (mAuthenticationErrorThrottleCount == MAX_FAILED_ATTEMPTS_LOCKOUT_PERMANENT) {
-                synchronized(mLockoutLock) {
-                    Log.d(TAG, "Too many attempts, lockout permanent")
-                    mLockoutType = LOCKOUT_TYPE_PERMANENT
-                }
-                cancelLockoutTimer()
-            } else if (mAuthenticationErrorCount == MAX_FAILED_ATTEMPTS_LOCKOUT_TIMED) {
-                synchronized(mLockoutLock) {
-                    Log.d(TAG, "Too many attempts, lockout for 30s")
-                    mLockoutType = LOCKOUT_TYPE_TIMED
-                }
-                mAuthenticationErrorCount = 0
-                startLockoutTimer()
-            }
-        }
-    }
-
-    private fun updateTimersAndLockout() {
-        if (mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) > -1 && !mUserUnlocked) {
-            if (!mOnIdleTimer) {
-                cancelIdleTimer()
-                startIdleTimer()
-            }
-        } else {
-            cancelIdleTimer()
-            resetLockoutCount()
-        }
-    }
-
-    private fun resetLockoutCount() {
-        synchronized(mAuthErrorLock) {
-            mAuthenticationErrorCount = 0
-            mAuthenticationErrorThrottleCount = 0
-        }
-        synchronized(mLockoutLock) {
-            mLockoutType = LOCKOUT_TYPE_DISABLED
-        }
-        cancelLockoutTimer()
-    }
-
     private inner class SenseServiceWrapper : ISenseService.Stub() {
-        override fun getFeature(feature: Int, faceId: Int): Boolean {
-            return false
-        }
+        override fun getFeature(feature: Int, faceId: Int): Boolean = false
 
         override fun setFeature(feature: Int, enable: Boolean, cryptoToken: ByteArray?, faceId: Int) {}
 
         override fun setCallback(faceServiceReceiver: ISenseServiceReceiver?) {
-            mSenseReceiver = faceServiceReceiver
+            senseReceiver = faceServiceReceiver
         }
 
         override fun enroll(cryptoToken: ByteArray?, timeout: Int, disabledFeatures: IntArray?) {
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "enroll")
-            if (Util.isFaceUnlockDisabledByDPM(this@SenseService) || mChallenge == 0L || cryptoToken == null) {
-                val sb = StringBuilder()
-                sb.append("Could not enroll: ")
-                sb.append("hasChallenge = ")
-                sb.append(mChallenge != 0L)
-                sb.append(" hasCryptoToken = ")
-                sb.append(cryptoToken != null)
-                Log.e(TAG, sb.toString())
+            if (Util.isFaceUnlockDisabledByDPM(this@SenseService) || challenge == 0L || cryptoToken == null) {
+                Log.e(TAG, "Could not enroll: hasChallenge=${challenge != 0L} hasCryptoToken=${cryptoToken != null}")
                 try {
-                    mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_TIMEOUT, 0)
+                    senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_TIMEOUT, 0)
                 } catch (e: RemoteException) {
                     e.printStackTrace()
                 }
-            } else {
-                mEnrollToken = cryptoToken
-                val faceId: Int = mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID)
-                if (faceId > 0) {
-                    mVendorImpl!!.deleteFeature(faceId - 1)
-                    mPreferenceHelper!!.removeSharePreferences(Constants.SHARED_KEY_FACE_ID)
-                    mPreferenceHelper!!.removeSharePreferences(Constants.SHARED_KEY_ENROLL_TOKEN)
-                }
-                resetLockoutCount()
-                mWorkHandler!!.post {
-                    mVendorImpl!!.saveFeatureStart()
-                    synchronized(this) {
-                        if (mCameraEnrollController == null) {
-                            mCameraEnrollController = FaceEnrollController.instance
-                        }
-                        mCameraEnrollController?.start(mCameraEnrollServiceCallback, 0)
+                return
+            }
+
+            enrollToken = cryptoToken
+            val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
+            if (faceId > 0) {
+                vendorImpl?.deleteFeature(faceId - 1)
+                preferenceHelper?.removeSharePreferences(Constants.SHARED_KEY_FACE_ID)
+                preferenceHelper?.removeSharePreferences(Constants.SHARED_KEY_ENROLL_TOKEN)
+            }
+
+            workHandler?.post {
+                vendorImpl?.init()
+                if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "VendorImpl initialized for enrollment")
+
+                synchronized(this@SenseService) {
+                    if (cameraEnrollController == null) {
+                        cameraEnrollController = FaceEnrollController.getInstance()
                     }
+                    cameraEnrollController?.start(enrollCallback, 0)
                 }
             }
         }
 
         override fun cancel() {
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "cancel")
-            mWorkHandler!!.post {
-                if (mCameraAuthController != null) {
-                    stopAuthentication()
-                }
-                if (mCameraEnrollController != null) {
-                    stopEnroll()
-                }
+            workHandler?.post {
+                cameraAuthController?.let { stopAuthentication() }
+                cameraEnrollController?.let { stopEnroll() }
                 try {
-                    mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
+                    senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
                 } catch (e: RemoteException) {
                     e.printStackTrace()
                 }
@@ -487,62 +300,62 @@ class SenseService : Service() {
         }
 
         override fun authenticate(operationId: Long) {
-            mCameraManager!!.registerAvailabilityCallback(mCameraAvailabilityCallback, mWorkHandler)
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "authenticate")
+
             if (!Util.isFaceUnlockAvailable(this@SenseService) ||
-                ContextCompat.checkSelfPermission(
-                    this@SenseService.applicationContext,
-                    Manifest.permission.CAMERA
-                ) != 0
+                ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.CAMERA) != 0
             ) {
                 try {
-                    mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
+                    senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
                 } catch (e: RemoteException) {
                     e.printStackTrace()
                 }
-            } else if (Util.isFaceUnlockDisabledByDPM(this@SenseService)) {
+                return
+            }
+
+            if (Util.isFaceUnlockDisabledByDPM(this@SenseService)) {
                 try {
-                    mSenseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
+                    senseReceiver?.onError(BiometricFaceConstants.FACE_ERROR_CANCELED, 0)
                 } catch (e: RemoteException) {
                     e.printStackTrace()
                 }
-            } else if (mLockoutType != LOCKOUT_TYPE_DISABLED) {
-                sendLockoutError()
-            } else {
-                mWorkHandler!!.post {
-                    mVendorImpl!!.compareStart()
-                    synchronized(this) {
-                        if (mCameraAuthController == null) {
-                            mCameraAuthController = FaceAuthenticationController(
-                                this@SenseService,
-                                mCameraAuthControllerCallback
-                            )
-                        } else {
-                            mCameraAuthController!!.stop()
-                        }
-                        mCameraAuthController!!.start()
+                return
+            }
+
+            workHandler?.post {
+                vendorImpl?.init()
+                vendorImpl?.compareStart()
+
+                synchronized(this@SenseService) {
+                    authLifecycleOwner = ServiceLifecycleOwner()
+                    authLifecycleOwner?.start()
+
+                    if (cameraAuthController == null) {
+                        cameraAuthController = FaceAuthenticationController(
+                            this@SenseService,
+                            authCallback
+                        )
+                    } else {
+                        cameraAuthController?.stop()
                     }
+                    cameraAuthController?.start(authLifecycleOwner!!)
                 }
             }
         }
 
         override fun remove(biometricId: Int) {
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "remove")
-            mWorkHandler!!.post {
-                val faceId: Int = mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID)
-                if (!(biometricId == 0 || faceId == biometricId)) {
+            workHandler?.post {
+                val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
+                if (biometricId != 0 && faceId != biometricId) {
                     Log.e(TAG, "Removing biometricId: $biometricId")
                 }
-                mVendorImpl!!.deleteFeature(faceId - 1)
-                mPreferenceHelper!!.removeSharePreferences(Constants.SHARED_KEY_FACE_ID)
-                mPreferenceHelper!!.removeSharePreferences(Constants.SHARED_KEY_ENROLL_TOKEN)
+                vendorImpl?.deleteFeature(faceId - 1)
+                preferenceHelper?.removeSharePreferences(Constants.SHARED_KEY_FACE_ID)
+                preferenceHelper?.removeSharePreferences(Constants.SHARED_KEY_ENROLL_TOKEN)
                 Util.setFaceUnlockAvailable(applicationContext)
                 try {
-                    if (biometricId == 0) {
-                        mSenseReceiver?.onRemoved(intArrayOf(faceId), mUserId)
-                    } else {
-                        mSenseReceiver?.onRemoved(intArrayOf(biometricId), mUserId)
-                    }
+                    senseReceiver?.onRemoved(if (biometricId == 0) intArrayOf(faceId) else intArrayOf(biometricId), userId)
                 } catch (e: RemoteException) {
                     e.printStackTrace()
                 }
@@ -550,21 +363,19 @@ class SenseService : Service() {
         }
 
         override fun enumerate(): Int {
-            val faceId: Int = mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID)
+            val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
             val faceIds = if (faceId > -1) intArrayOf(faceId) else IntArray(0)
-            mWorkHandler!!.post {
+            workHandler?.post {
                 try {
-                    if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "enumerate = $mSenseReceiver")
-                    if (mSenseReceiver == null) {
+                    if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "enumerate = $senseReceiver")
+                    if (senseReceiver == null) {
                         try {
                             Thread.sleep(50)
                         } catch (e: InterruptedException) {
                             e.printStackTrace()
                         }
                     }
-                    if (mSenseReceiver != null) {
-                        mSenseReceiver?.onEnumerate(faceIds, mUserId)
-                    }
+                    senseReceiver?.onEnumerate(faceIds, userId)
                 } catch (e: RemoteException) {
                     e.printStackTrace()
                 }
@@ -573,27 +384,27 @@ class SenseService : Service() {
         }
 
         override fun getFeatureCount(): Int {
-            return if (mPreferenceHelper!!.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) > -1) 1 else 0
+            return if ((preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0) > -1) 1 else 0
         }
 
         override fun generateChallenge(timeout: Int): Long {
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "generateChallenge + $timeout")
-            if (mChallengeCount <= 0 || mChallenge == 0L) {
-                mChallenge = Random().nextLong()
+            if (challengeCount <= 0 || challenge == 0L) {
+                challenge = Random().nextLong()
             }
-            mChallengeCount += 1
-            mWorkHandler!!.removeMessages(MSG_CHALLENGE_TIMEOUT)
-            mWorkHandler!!.sendEmptyMessageDelayed(MSG_CHALLENGE_TIMEOUT, timeout * 1000L)
-            return mChallenge
+            challengeCount += 1
+            workHandler?.removeMessages(MSG_CHALLENGE_TIMEOUT)
+            workHandler?.sendEmptyMessageDelayed(MSG_CHALLENGE_TIMEOUT, timeout * 1000L)
+            return challenge
         }
 
         override fun revokeChallenge(): Int {
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "revokeChallenge")
-            mChallengeCount -= 1
-            if (mChallengeCount <= 0 && mChallenge != 0L) {
-                mChallenge = 0
-                mChallengeCount = 0
-                mWorkHandler!!.removeMessages(MSG_CHALLENGE_TIMEOUT)
+            challengeCount -= 1
+            if (challengeCount <= 0 && challenge != 0L) {
+                challenge = 0
+                challengeCount = 0
+                workHandler?.removeMessages(MSG_CHALLENGE_TIMEOUT)
                 stopCurrentWork()
             }
             return 0
@@ -601,33 +412,14 @@ class SenseService : Service() {
 
         override fun getAuthenticatorId(): Int = -1
 
-        override fun resetLockout(cryptoToken: ByteArray?) {
-            resetLockoutCount()
-        }
+        override fun resetLockout(cryptoToken: ByteArray?) {}
     }
 
-    private fun sendLockoutError() {
-        var errorCode = 0
-        when (mLockoutType) {
-            LOCKOUT_TYPE_PERMANENT -> errorCode =
-                BiometricFaceConstants.FACE_ERROR_LOCKOUT_PERMANENT
-            LOCKOUT_TYPE_TIMED -> errorCode = BiometricFaceConstants.FACE_ERROR_LOCKOUT
-            LOCKOUT_TYPE_IDLE -> errorCode = BiometricFaceConstants.FACE_ERROR_VENDOR
-        }
-        try {
-            mSenseReceiver?.onError(errorCode, 0)
-        } catch (e2: RemoteException) {
-            e2.printStackTrace()
-        }
-    }
-
-    private inner class FaceHandler(looper: Looper?) : Handler(
-        looper!!
-    ) {
+    private inner class FaceHandler(looper: Looper) : Handler(looper) {
         override fun handleMessage(message: Message) {
             if (message.what == MSG_CHALLENGE_TIMEOUT) {
-                mChallenge = 0
-                mChallengeCount = 0
+                challenge = 0
+                challengeCount = 0
                 stopCurrentWork()
             }
         }
@@ -635,17 +427,6 @@ class SenseService : Service() {
 
     companion object {
         private const val TAG = "SenseService"
-        private const val ALARM_FAIL_TIMEOUT_LOCKOUT = "co.aospa.sense.ACTION_LOCKOUT_RESET"
-        private const val ALARM_TIMEOUT_FREEZED = "co.aospa.sense.freezedtimeout"
-        private const val DEFAULT_IDLE_TIMEOUT_MS = (3600000 * 4 // 4 hours
-                ).toLong()
-        private const val FAIL_LOCKOUT_TIMEOUT_MS: Long = 30000 // 30 seconds
-        private const val MAX_FAILED_ATTEMPTS_LOCKOUT_PERMANENT = 10
-        private const val MAX_FAILED_ATTEMPTS_LOCKOUT_TIMED = 5
         private const val MSG_CHALLENGE_TIMEOUT = 100
-        private const val LOCKOUT_TYPE_DISABLED = 0
-        private const val LOCKOUT_TYPE_TIMED = 1
-        private const val LOCKOUT_TYPE_PERMANENT = 2
-        private const val LOCKOUT_TYPE_IDLE = 3
     }
 }
