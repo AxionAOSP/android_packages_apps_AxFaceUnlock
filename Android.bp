@@ -103,7 +103,6 @@ cc_prebuilt_library_shared {
             srcs: ["libs/androidx-camera_camera-core/jni/x86/libimage_processing_util_jni.so"],
         },
     },
-    system_ext_specific: true,
     strip: {
         none: true,
     },
@@ -126,7 +125,6 @@ cc_prebuilt_library_shared {
             srcs: ["libs/androidx-camera_camera-core/jni/x86/libsurface_util_jni.so"],
         },
     },
-    system_ext_specific: true,
     strip: {
         none: true,
     },
