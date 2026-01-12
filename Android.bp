@@ -35,6 +35,8 @@ android_app {
         "setupcompat",
         "setupdesign",
         "tensorflowlite_java",
+        "tensorflow-lite-gpu",
+        "tensorflow-lite-gpu-api",
         "tflite_support_java",
         "vendor.aospa.biometrics.face",
         "kotlinx-coroutines-android",
@@ -53,6 +55,7 @@ android_app {
 
     jni_libs: [
         "libtensorflowlite_jni",
+        "libtensorflowlite_gpu_jni",
         "libimage_processing_util_jni",
         "libsurface_util_jni",
     ],
@@ -85,6 +88,18 @@ prebuilt_etc {
     src: "permissions/privapp_whitelist_co.aospa.sense.xml",
     sub_dir: "permissions",
     system_ext_specific: true,
+}
+
+android_library_import {
+    name: "tensorflow-lite-gpu",
+    aars: ["libs/tensorflow-lite-gpu.aar"],
+    sdk_version: "current",
+}
+
+android_library_import {
+    name: "tensorflow-lite-gpu-api",
+    aars: ["libs/tensorflow-lite-gpu-api.aar"],
+    sdk_version: "current",
 }
 
 cc_prebuilt_library_shared {
@@ -123,6 +138,28 @@ cc_prebuilt_library_shared {
         },
         x86: {
             srcs: ["libs/androidx-camera_camera-core/jni/x86/libsurface_util_jni.so"],
+        },
+    },
+    strip: {
+        none: true,
+    },
+    check_elf_files: false,
+}
+
+cc_prebuilt_library_shared {
+    name: "libtensorflowlite_gpu_jni",
+    arch: {
+        arm64: {
+            srcs: ["libs/tensorflow-lite-gpu-jni/arm64-v8a/libtensorflowlite_gpu_jni.so"],
+        },
+        arm: {
+            srcs: ["libs/tensorflow-lite-gpu-jni/armeabi-v7a/libtensorflowlite_gpu_jni.so"],
+        },
+        x86_64: {
+            srcs: ["libs/tensorflow-lite-gpu-jni/x86_64/libtensorflowlite_gpu_jni.so"],
+        },
+        x86: {
+            srcs: ["libs/tensorflow-lite-gpu-jni/x86/libtensorflowlite_gpu_jni.so"],
         },
     },
     strip: {

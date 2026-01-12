@@ -8,10 +8,15 @@ package co.aospa.sense.ml
 
 import android.content.Context
 import android.graphics.*
+import co.aospa.sense.util.GpuDelegateHelper
 import co.aospa.sense.util.Loggable
 import co.aospa.sense.util.logD
 import org.tensorflow.lite.*
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.*
+import org.tensorflow.lite.support.common.ops.NormalizeOp
+import org.tensorflow.lite.support.image.*
+import org.tensorflow.lite.support.image.ops.ResizeOp
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.*
@@ -45,14 +50,35 @@ class FaceDetector(context: Context) : Loggable {
     )
 
     private var interpreter: Interpreter? = null
+    private var gpuDelegate: Delegate? = null
+    private var nnApiDelegate: NnApiDelegate? = null
     private val anchors: FloatArray by lazy { generateAnchors() }
-    private var inputBitmap: Bitmap? = null
+    
+    private val imageTensorProcessor = ImageProcessor.Builder()
+        .add(ResizeOp(INPUT_SIZE, INPUT_SIZE, ResizeOp.ResizeMethod.BILINEAR))
+        .add(NormalizeOp(127.5f, 127.5f))
+        .build()
 
     init {
         try {
-            val options = Interpreter.Options().apply {
-                setNumThreads(2)
+            val options = Interpreter.Options()
+            
+            gpuDelegate = GpuDelegateHelper.createGpuDelegate()
+            if (gpuDelegate != null) {
+                options.addDelegate(gpuDelegate)
+                logD("FaceDetector: Applied GPU Delegate")
+            } else {
+                try {
+                    nnApiDelegate = NnApiDelegate()
+                    options.addDelegate(nnApiDelegate)
+                    logD("FaceDetector: Applied NNAPI Delegate")
+                } catch (e: Exception) {
+                    logD("FaceDetector: NNAPI Delegate unavailable: ${e.message}")
+                    options.numThreads = 2
+                    logD("FaceDetector: Fallback to CPU with 2 threads")
+                }
             }
+            
             interpreter = Interpreter(FileUtil.loadMappedFile(context, MODEL_FILE), options)
             logD("BlazeFace detector initialized")
         } catch (e: Exception) {
@@ -63,16 +89,10 @@ class FaceDetector(context: Context) : Loggable {
     suspend fun detectFaces(bitmap: Bitmap): List<Detection> = withContext(Dispatchers.IO) {
         val interp = interpreter ?: return@withContext emptyList()
 
-        if (inputBitmap == null) {
-            inputBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
-        }
-
-        val canvas = Canvas(inputBitmap!!)
-        val matrix = Matrix()
-        matrix.postScale(INPUT_SIZE.toFloat() / bitmap.width, INPUT_SIZE.toFloat() / bitmap.height)
-        canvas.drawBitmap(bitmap, matrix, null)
-
-        val inputBuffer = convertBitmapToBuffer(inputBitmap!!)
+        val tensorImage = TensorImage(DataType.FLOAT32)
+        tensorImage.load(bitmap)
+        val processedImage = imageTensorProcessor.process(tensorImage)
+        val inputBuffer = processedImage.buffer
 
         val regressors = Array(1) { Array(NUM_BOXES) { FloatArray(NUM_COORDS) } }
         val classifiers = Array(1) { Array(NUM_BOXES) { FloatArray(1) } }
@@ -168,23 +188,6 @@ class FaceDetector(context: Context) : Loggable {
         )
     }
 
-    private fun convertBitmapToBuffer(bitmap: Bitmap): ByteBuffer {
-        val buffer = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3)
-        buffer.order(ByteOrder.nativeOrder())
-
-        val pixels = IntArray(INPUT_SIZE * INPUT_SIZE)
-        bitmap.getPixels(pixels, 0, INPUT_SIZE, 0, 0, INPUT_SIZE, INPUT_SIZE)
-
-        for (pixel in pixels) {
-            buffer.putFloat(((pixel shr 16 and 0xFF) - 127.5f) / 127.5f)
-            buffer.putFloat(((pixel shr 8 and 0xFF) - 127.5f) / 127.5f)
-            buffer.putFloat(((pixel and 0xFF) - 127.5f) / 127.5f)
-        }
-
-        buffer.rewind()
-        return buffer
-    }
-
     private fun generateAnchors(): FloatArray {
         val anchors = mutableListOf<Float>()
 
@@ -245,5 +248,7 @@ class FaceDetector(context: Context) : Loggable {
     fun close() {
         interpreter?.close()
         interpreter = null
+        (gpuDelegate as? AutoCloseable)?.close()
+        nnApiDelegate?.close()
     }
 }

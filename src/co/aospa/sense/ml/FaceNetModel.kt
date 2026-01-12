@@ -8,9 +8,12 @@ package co.aospa.sense.ml
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.provider.Settings
+import co.aospa.sense.util.GpuDelegateHelper
 import co.aospa.sense.util.Loggable
 import co.aospa.sense.util.logD
 import org.tensorflow.lite.*
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.*
 import org.tensorflow.lite.support.common.ops.NormalizeOp
 import org.tensorflow.lite.support.image.*
@@ -25,22 +28,44 @@ class FaceNetModel(context: Context) : Loggable {
     private val embeddingDim = 512
 
     private var interpreter: Interpreter
+    private var gpuDelegate: Delegate? = null
+    private var nnApiDelegate: NnApiDelegate? = null
 
     private val imageTensorProcessor = ImageProcessor.Builder()
         .add(ResizeOp(imgSize, imgSize, ResizeOp.ResizeMethod.BILINEAR))
-        .add(StandardizeOp())
+        .add(NormalizeOp(127.5f, 127.5f))
         .build()
 
     init {
-        val interpreterOptions = Interpreter.Options().apply {
-            numThreads = 4
+        val interpreterOptions = Interpreter.Options()
+        
+        gpuDelegate = GpuDelegateHelper.createGpuDelegate()
+        if (gpuDelegate != null) {
+            interpreterOptions.addDelegate(gpuDelegate)
+            logD("FaceNetModel: Applied GPU Delegate")
+            Settings.Secure.putInt(context.contentResolver, "face_recognition_gpu", 1)
+        } else {
+             try {
+                nnApiDelegate = NnApiDelegate()
+                interpreterOptions.addDelegate(nnApiDelegate)
+                logD("FaceNetModel: Applied NNAPI Delegate")
+            } catch (e: Exception) {
+                logD("FaceNetModel: NNAPI Delegate unavailable: ${e.message}")
+                interpreterOptions.numThreads = 4
+                logD("FaceNetModel: Fallback to CPU with 4 threads")
+            }
+            Settings.Secure.putInt(context.contentResolver, "face_recognition_gpu", 0)
         }
+        
         interpreter = Interpreter(FileUtil.loadMappedFile(context, "facenet_512.tflite"), interpreterOptions)
-        logD("FaceNetModel initialized (FaceNet-512, CPU)")
+        logD("FaceNetModel initialized")
     }
 
     suspend fun getEmbedding(image: Bitmap): FloatArray = withContext(Dispatchers.IO) {
-        runFaceNet(convertBitmapToBuffer(image))[0]
+        val tensorImage = TensorImage(DataType.FLOAT32)
+        tensorImage.load(image)
+        val processedImage = imageTensorProcessor.process(tensorImage)
+        runFaceNet(processedImage.buffer)[0]
     }
 
     private fun runFaceNet(inputs: Any): Array<FloatArray> {
@@ -48,9 +73,6 @@ class FaceNetModel(context: Context) : Loggable {
         interpreter.run(inputs, outputs)
         return outputs
     }
-
-    private fun convertBitmapToBuffer(image: Bitmap) = 
-        imageTensorProcessor.process(TensorImage.fromBitmap(image)).buffer
 
     fun cosineDistance(x1: FloatArray, x2: FloatArray): Float {
         var mag1 = 0.0f
@@ -72,20 +94,9 @@ class FaceNetModel(context: Context) : Loggable {
         return cosineDistance(embed1, embed2)
     }
 
-    fun close() = interpreter.close()
-
-    class StandardizeOp : TensorOperator {
-        override fun apply(p0: TensorBuffer?): TensorBuffer {
-            val pixels = p0!!.floatArray
-            val mean = pixels.average().toFloat()
-            var std = sqrt(pixels.map { pi -> (pi - mean).pow(2) }.sum() / pixels.size.toFloat())
-            std = max(std, 1f / sqrt(pixels.size.toFloat()))
-            for (i in pixels.indices) {
-                pixels[i] = (pixels[i] - mean) / std
-            }
-            val output = TensorBufferFloat.createFixedSize(p0.shape, DataType.FLOAT32)
-            output.loadArray(pixels)
-            return output
-        }
+    fun close() {
+        interpreter.close()
+        (gpuDelegate as? AutoCloseable)?.close()
+        nnApiDelegate?.close()
     }
 }

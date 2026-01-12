@@ -9,10 +9,18 @@ package co.aospa.sense.ml
 import android.content.Context
 import android.content.res.AssetManager
 import android.graphics.Bitmap
+import co.aospa.sense.util.GpuDelegateHelper
 import co.aospa.sense.util.Loggable
 import co.aospa.sense.util.logD
+import org.tensorflow.lite.Delegate
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.FileUtil
+import org.tensorflow.lite.support.common.ops.NormalizeOp
+import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.TensorImage
+import org.tensorflow.lite.support.image.ops.ResizeOp
+import org.tensorflow.lite.DataType
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -24,11 +32,33 @@ import kotlin.math.abs
 class AntiSpoofModel(context: Context) : Loggable {
 
     private val interpreter: Interpreter
+    private var gpuDelegate: Delegate? = null
+    private var nnApiDelegate: NnApiDelegate? = null
+    
+    private val imageTensorProcessor = ImageProcessor.Builder()
+        .add(ResizeOp(INPUT_IMAGE_SIZE, INPUT_IMAGE_SIZE, ResizeOp.ResizeMethod.BILINEAR))
+        .add(NormalizeOp(0f, 255f))
+        .build()
 
     init {
-        val options = Interpreter.Options().apply {
-            numThreads = 4
+        val options = Interpreter.Options()
+        
+        gpuDelegate = GpuDelegateHelper.createGpuDelegate()
+        if (gpuDelegate != null) {
+            options.addDelegate(gpuDelegate)
+            logD("AntiSpoofModel: Applied GPU Delegate")
+        } else {
+            try {
+                nnApiDelegate = NnApiDelegate()
+                options.addDelegate(nnApiDelegate)
+                logD("AntiSpoofModel: Applied NNAPI Delegate")
+            } catch (e: Exception) {
+                logD("AntiSpoofModel: NNAPI Delegate unavailable: ${e.message}")
+                options.numThreads = 4
+                logD("AntiSpoofModel: Fallback to CPU with 4 threads")
+            }
         }
+        
         interpreter = Interpreter(FileUtil.loadMappedFile(context, MODEL_FILE), options)
     }
 
@@ -45,9 +75,11 @@ class AntiSpoofModel(context: Context) : Loggable {
             return@withContext Result(isSpoof = true, score = 0f)
         }
 
-        val img = normalizeImage(bitmapScale)
-        val input = Array(1) { Array(INPUT_IMAGE_SIZE) { Array(INPUT_IMAGE_SIZE) { FloatArray(3) } } }
-        input[0] = img
+        val tensorImage = TensorImage(DataType.FLOAT32)
+        tensorImage.load(bitmap)
+        val processedImage = imageTensorProcessor.process(tensorImage)
+        
+        val inputBuffer = processedImage.buffer
 
         val clss_pred = Array(1) { FloatArray(8) }
         val leaf_node_mask = Array(1) { FloatArray(8) }
@@ -56,7 +88,7 @@ class AntiSpoofModel(context: Context) : Loggable {
         outputs[interpreter.getOutputIndex("Identity")] = clss_pred
         outputs[interpreter.getOutputIndex("Identity_1")] = leaf_node_mask
         
-        interpreter.runForMultipleInputsOutputs(arrayOf(input), outputs)
+        interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
 
         logD("detect: clss_pred: [" + clss_pred[0][0] + ", " + clss_pred[0][1] + ", "
                 + clss_pred[0][2] + ", " + clss_pred[0][3] + ", " + clss_pred[0][4] + ", "
@@ -82,35 +114,10 @@ class AntiSpoofModel(context: Context) : Loggable {
         return score
     }
 
-    private fun normalizeImage(bitmap: Bitmap): Array<Array<FloatArray>> {
-        val h = bitmap.height
-        val w = bitmap.width
-        val floatValues = Array(h) { Array(w) { FloatArray(3) } }
-
-        val imageStd = 255f
-        val pixels = IntArray(h * w)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, w, h)
-        for (i in 0 until h) {
-            for (j in 0 until w) {
-                val `val` = pixels[i * w + j]
-                val r = ((`val` shr 16) and 0xFF) / imageStd
-                val g = ((`val` shr 8) and 0xFF) / imageStd
-                val b = (`val` and 0xFF) / imageStd
-
-                floatValues[i][j][0] = r
-                floatValues[i][j][1] = g
-                floatValues[i][j][2] = b
-            }
-        }
-        return floatValues
-    }
-
     fun laplacian(bitmap: Bitmap): Int {
-        val bitmapScale = Bitmap.createScaledBitmap(bitmap, INPUT_IMAGE_SIZE, INPUT_IMAGE_SIZE, true)
-
         val laplace = arrayOf(intArrayOf(0, 1, 0), intArrayOf(1, -4, 1), intArrayOf(0, 1, 0))
         val size = laplace.size
-        val img = convertGreyImg(bitmapScale)
+        val img = convertGreyImg(bitmap)
         val height = img.size
         val width = img[0].size
 
@@ -155,7 +162,11 @@ class AntiSpoofModel(context: Context) : Loggable {
         return result
     }
 
-    fun close() = interpreter.close()
+    fun close() {
+        interpreter.close()
+        (gpuDelegate as? AutoCloseable)?.close()
+        nnApiDelegate?.close()
+    }
 
     companion object {
         private const val MODEL_FILE = "face_anti_spoofing.tflite"
