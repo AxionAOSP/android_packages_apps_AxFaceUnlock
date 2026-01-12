@@ -20,6 +20,8 @@ import co.aospa.sense.util.Loggable
 import co.aospa.sense.util.logD
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import android.os.SystemProperties
+import androidx.camera.camera2.interop.Camera2CameraInfo
 
 class CameraXService(
     private val context: Context,
@@ -72,9 +74,21 @@ class CameraXService(
     private fun bindCamera() {
         val provider = cameraProvider ?: return
 
-        val cameraSelector = CameraSelector.Builder()
-            .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
-            .build()
+        val cameraId = SystemProperties.get("ro.face.sense_service.camera_id", "")
+        val cameraSelector = if (cameraId.isNotEmpty()) {
+            logD("Using specific camera ID: $cameraId")
+            CameraSelector.Builder()
+                .addCameraFilter { cameraInfos ->
+                    cameraInfos.filter {
+                        Camera2CameraInfo.from(it).cameraId == cameraId
+                    }
+                }
+                .build()
+        } else {
+            CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
+                .build()
+        }
 
         imageAnalysis = ImageAnalysis.Builder()
             .setTargetResolution(Size(640, 480))
@@ -106,9 +120,20 @@ class CameraXService(
     private fun rebindWithPreview() {
         val provider = cameraProvider ?: return
         
-        val cameraSelector = CameraSelector.Builder()
-            .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
-            .build()
+        val cameraId = SystemProperties.get("ro.face.sense_service.camera_id", "")
+        val cameraSelector = if (cameraId.isNotEmpty()) {
+            CameraSelector.Builder()
+                .addCameraFilter { cameraInfos ->
+                    cameraInfos.filter {
+                        Camera2CameraInfo.from(it).cameraId == cameraId
+                    }
+                }
+                .build()
+        } else {
+            CameraSelector.Builder()
+                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
+                .build()
+        }
 
         try {
 
