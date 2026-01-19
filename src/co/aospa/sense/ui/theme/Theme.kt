@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+@file:OptIn(ExperimentalMaterial3ExpressiveApi::class)
+
 package co.aospa.sense.ui.theme
 
 import android.app.Activity
@@ -123,8 +125,9 @@ fun SenseTheme(
         }
     }
 
-    MaterialTheme(
+    MaterialExpressiveTheme(
         colorScheme = colorScheme,
+        motionScheme = MotionScheme.expressive(),
         typography = SenseTypography,
         content = content
     )
