@@ -3,7 +3,6 @@ package co.aospa.sense.util
 import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.util.Log
-import java.lang.reflect.InvocationTargetException
 
 object Util {
     private const val TAG = "Sense:Utils"
@@ -35,28 +34,16 @@ object Util {
         val devicePolicyManager =
             context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         try {
-            if (devicePolicyManager.getPasswordQuality(null) > 32768) {
+            if (devicePolicyManager.getPasswordQuality(null) > DevicePolicyManager.PASSWORD_QUALITY_ALPHABETIC) {
                 return true
             }
         } catch (e: SecurityException) {
             Log.e(TAG, "isFaceUnlockDisabledByDPM error:", e)
         }
-        return devicePolicyManager.getKeyguardDisabledFeatures(null) and 128 != 0
+        return devicePolicyManager.getKeyguardDisabledFeatures(null) and DevicePolicyManager.KEYGUARD_DISABLE_FACE != 0
     }
 
     fun getUserId(context: Context?): Int {
-        return try {
-            Context::class.java.getDeclaredMethod("getUserId", *arrayOfNulls(0))
-                .invoke(context, *arrayOfNulls(0)) as Int
-        } catch (e: NoSuchMethodException) {
-            e.printStackTrace()
-            0
-        } catch (e: IllegalAccessException) {
-            e.printStackTrace()
-            0
-        } catch (e: InvocationTargetException) {
-            e.printStackTrace()
-            0
-        }
+        return context?.userId ?: 0
     }
 }

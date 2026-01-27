@@ -33,14 +33,12 @@ class SenseService : Service() {
 
     private var cameraAuthController: FaceAuthenticationController? = null
     private var cameraEnrollController: FaceEnrollController? = null
-    private var cameraManager: CameraManager? = null
     private var senseReceiver: ISenseServiceReceiver? = null
     private var preferenceHelper: PreferenceHelper? = null
-    private var service: SenseServiceWrapper? = null
+    private var wrapper: SenseServiceWrapper? = null
     private var vendorImpl: VendorImpl? = null
     private var authLifecycleOwner: ServiceLifecycleOwner? = null
     private var enrollLifecycleOwner: ServiceLifecycleOwner? = null
-    private var cameraId = 0
     private var challengeCount = 0
     private var userId = 0
     private var challenge: Long = 0
@@ -103,7 +101,7 @@ class SenseService : Service() {
                     val faceIds = 1
                     if (result == 0) {
                         if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "Enrollment complete")
-                        val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
+                        val faceId = getFaceId()
                         if (faceId > 0) {
                             vendorImpl?.deleteFeature(faceId)
                         }
@@ -166,14 +164,13 @@ class SenseService : Service() {
 
     override fun onBind(intent: Intent): IBinder? {
         if (Util.IS_DEBUG_LOGGING) Log.i(TAG, "onBind")
-        return service
+        return wrapper
     }
 
     override fun onCreate() {
         super.onCreate()
         if (Util.IS_DEBUG_LOGGING) Log.i(TAG, "onCreate")
-        cameraManager = getSystemService(CameraManager::class.java)
-        service = SenseServiceWrapper()
+        wrapper = SenseServiceWrapper()
         val handlerThread = HandlerThread(TAG, -2)
         handlerThread.start()
         workHandler = FaceHandler(handlerThread.looper)
@@ -244,6 +241,8 @@ class SenseService : Service() {
         }
     }
 
+    private fun getFaceId(): Int = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
+
     private inner class SenseServiceWrapper : ISenseService.Stub() {
         override fun getFeature(feature: Int, faceId: Int): Boolean = false
 
@@ -266,7 +265,7 @@ class SenseService : Service() {
             }
 
             enrollToken = cryptoToken
-            val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
+            val faceId = getFaceId()
             if (faceId > 0) {
                 vendorImpl?.deleteFeature(faceId - 1)
                 preferenceHelper?.removeSharePreferences(Constants.SHARED_KEY_FACE_ID)
@@ -346,7 +345,7 @@ class SenseService : Service() {
         override fun remove(biometricId: Int) {
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "remove")
             workHandler?.post {
-                val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
+                val faceId = getFaceId()
                 if (biometricId != 0 && faceId != biometricId) {
                     Log.e(TAG, "Removing biometricId: $biometricId")
                 }
@@ -363,7 +362,7 @@ class SenseService : Service() {
         }
 
         override fun enumerate(): Int {
-            val faceId = preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0
+            val faceId = getFaceId()
             val faceIds = if (faceId > -1) intArrayOf(faceId) else IntArray(0)
             workHandler?.post {
                 try {
@@ -383,9 +382,7 @@ class SenseService : Service() {
             return 0
         }
 
-        override fun getFeatureCount(): Int {
-            return if ((preferenceHelper?.getIntValueByKey(Constants.SHARED_KEY_FACE_ID) ?: 0) > -1) 1 else 0
-        }
+        override fun getFeatureCount(): Int = if (getFaceId() > -1) 1 else 0
 
         override fun generateChallenge(timeout: Int): Long {
             if (Util.IS_DEBUG_LOGGING) Log.d(TAG, "generateChallenge + $timeout")

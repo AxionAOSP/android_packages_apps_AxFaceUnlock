@@ -22,6 +22,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 import android.os.SystemProperties
 import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 
 class CameraXService(
     private val context: Context,
@@ -44,6 +45,8 @@ class CameraXService(
     private var frameBitmap: Bitmap? = null
     private var surfaceProvider: Preview.SurfaceProvider? = null
     private var isBound = false
+
+    private val targetSize: Size by lazy { Size(640, 480) }
 
     fun setSurfaceProvider(provider: Preview.SurfaceProvider?) {
         val hadProvider = surfaceProvider != null
@@ -71,37 +74,63 @@ class CameraXService(
         }, ContextCompat.getMainExecutor(context))
     }
 
-    private fun bindCamera() {
-        val provider = cameraProvider ?: return
-
+    @ExperimentalCamera2Interop
+    private fun getCameraSelector(): CameraSelector {
         val cameraId = SystemProperties.get("ro.face.sense_service.camera_id", "")
-        val cameraSelector = if (cameraId.isNotEmpty()) {
-            logD("Using specific camera ID: $cameraId")
-            CameraSelector.Builder()
+        if (cameraId.isNotEmpty()) {
+            logD("Requested camera ID from prop: $cameraId")
+            return CameraSelector.Builder()
                 .addCameraFilter { cameraInfos ->
-                    cameraInfos.filter {
-                        Camera2CameraInfo.from(it).cameraId == cameraId
+                    val allIds = cameraInfos.map { Camera2CameraInfo.from(it).cameraId }
+                    logD("Available camera IDs: $allIds")
+                    
+                    val filtered = cameraInfos.filter {
+                        try {
+                            val infoId = Camera2CameraInfo.from(it).cameraId
+                            infoId == cameraId || infoId.endsWith(":$cameraId")
+                        } catch (e: Exception) {
+                            false
+                        }
+                    }
+                    
+                    if (filtered.isEmpty()) {
+                        logD("Camera ID $cameraId not found in available list, searching for front camera...")
+                        val frontCameras = cameraInfos.filter {
+                            it.lensFacing == CameraSelector.LENS_FACING_FRONT
+                        }
+                        if (frontCameras.isEmpty()) {
+                            logD("No front camera found, using first available camera")
+                            cameraInfos.take(1)
+                        } else {
+                            frontCameras
+                        }
+                    } else {
+                        logD("Selected camera ID(s): ${filtered.map { Camera2CameraInfo.from(it).cameraId }}")
+                        filtered
                     }
                 }
                 .build()
-        } else {
-            CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
-                .build()
         }
 
-        imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(Size(640, 480))
-            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+        logD("No camera ID prop, using default front camera")
+        return CameraSelector.Builder()
+            .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
             .build()
+    }
 
+    @ExperimentalCamera2Interop
+    private fun bindCamera() {
+        val provider = cameraProvider ?: return
+        val cameraSelector = getCameraSelector()
+
+        imageAnalysis = createImageAnalysis()
         imageAnalysis?.setAnalyzer(analyzerExecutor, analyzer)
 
         try {
+            provider.unbindAll()
             if (surfaceProvider != null) {
                 preview = Preview.Builder()
-                    .setTargetResolution(Size(640, 480))
+                    .setTargetResolution(targetSize)
                     .build()
                 preview?.surfaceProvider = surfaceProvider
                 provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis)
@@ -117,36 +146,19 @@ class CameraXService(
         }
     }
 
+    @ExperimentalCamera2Interop
     private fun rebindWithPreview() {
         val provider = cameraProvider ?: return
-        
-        val cameraId = SystemProperties.get("ro.face.sense_service.camera_id", "")
-        val cameraSelector = if (cameraId.isNotEmpty()) {
-            CameraSelector.Builder()
-                .addCameraFilter { cameraInfos ->
-                    cameraInfos.filter {
-                        Camera2CameraInfo.from(it).cameraId == cameraId
-                    }
-                }
-                .build()
-        } else {
-            CameraSelector.Builder()
-                .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
-                .build()
-        }
+        val cameraSelector = getCameraSelector()
 
         try {
-
+            provider.unbindAll()
             preview = Preview.Builder()
-                .setTargetResolution(Size(640, 480))
+                .setTargetResolution(targetSize)
                 .build()
             preview?.surfaceProvider = surfaceProvider
 
-            imageAnalysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(640, 480))
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .build()
+            imageAnalysis = createImageAnalysis()
             imageAnalysis?.setAnalyzer(analyzerExecutor, analyzer)
 
             provider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, imageAnalysis)
@@ -157,7 +169,15 @@ class CameraXService(
         }
     }
 
-    @androidx.camera.core.ExperimentalGetImage
+    private fun createImageAnalysis(): ImageAnalysis {
+        return ImageAnalysis.Builder()
+            .setTargetResolution(targetSize)
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+            .build()
+    }
+
+    @ExperimentalGetImage
     private val analyzer = ImageAnalysis.Analyzer { image ->
         if (isProcessing) {
             image.close()
