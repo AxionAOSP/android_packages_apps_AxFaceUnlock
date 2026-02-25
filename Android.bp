@@ -90,18 +90,6 @@ prebuilt_etc {
     system_ext_specific: true,
 }
 
-android_library_import {
-    name: "tensorflow-lite-gpu",
-    aars: ["libs/tensorflow-lite-gpu.aar"],
-    sdk_version: "current",
-}
-
-android_library_import {
-    name: "tensorflow-lite-gpu-api",
-    aars: ["libs/tensorflow-lite-gpu-api.aar"],
-    sdk_version: "current",
-}
-
 cc_prebuilt_library_shared {
     name: "libimage_processing_util_jni",
     arch: {
@@ -138,28 +126,6 @@ cc_prebuilt_library_shared {
         },
         x86: {
             srcs: ["libs/androidx-camera_camera-core/jni/x86/libsurface_util_jni.so"],
-        },
-    },
-    strip: {
-        none: true,
-    },
-    check_elf_files: false,
-}
-
-cc_prebuilt_library_shared {
-    name: "libtensorflowlite_gpu_jni",
-    arch: {
-        arm64: {
-            srcs: ["libs/tensorflow-lite-gpu-jni/arm64-v8a/libtensorflowlite_gpu_jni.so"],
-        },
-        arm: {
-            srcs: ["libs/tensorflow-lite-gpu-jni/armeabi-v7a/libtensorflowlite_gpu_jni.so"],
-        },
-        x86_64: {
-            srcs: ["libs/tensorflow-lite-gpu-jni/x86_64/libtensorflowlite_gpu_jni.so"],
-        },
-        x86: {
-            srcs: ["libs/tensorflow-lite-gpu-jni/x86/libtensorflowlite_gpu_jni.so"],
         },
     },
     strip: {
